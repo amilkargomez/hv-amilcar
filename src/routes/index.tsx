@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { CVView } from "@/components/cv/CVView";
 import { Button } from "@/components/ui/button";
-import { FileImage, FileText, FileCode2, Loader2 } from "lucide-react";
+import { FileImage, FileText, FileCode2, FileCheck2, Loader2 } from "lucide-react";
 import type { CVData } from "@/lib/cv-types";
 import { exportCvToImage, exportCvToPdf, exportCvToMarkdown } from "@/lib/cv-export";
 
@@ -17,7 +17,7 @@ export const Route = createFileRoute("/")({
   }),
 });
 
-type ExportKind = "png" | "pdf" | "md";
+type ExportKind = "png" | "pdf" | "pdf1" | "md";
 
 function Index() {
   const [data, setData] = useState<CVData | null>(null);
@@ -46,6 +46,8 @@ function Index() {
         await exportCvToImage(cvRef.current, data);
       } else if (kind === "pdf") {
         await exportCvToPdf(data);
+      } else if (kind === "pdf1") {
+        await exportCvToPdf(data, { compact: true });
       } else {
         exportCvToMarkdown(data);
       }
@@ -71,6 +73,10 @@ function Index() {
           <Button onClick={() => run("pdf")} size="lg" disabled={busy !== null}>
             <Icon kind="pdf" fallback={FileText} />
             {busy === "pdf" ? "Generando PDF..." : "Descargar PDF"}
+          </Button>
+          <Button onClick={() => run("pdf1")} size="lg" disabled={busy !== null}>
+            <Icon kind="pdf1" fallback={FileCheck2} />
+            {busy === "pdf1" ? "Generando PDF..." : "Descargar PDF (1 página)"}
           </Button>
           <Button onClick={() => run("md")} size="lg" variant="outline" disabled={busy !== null}>
             <Icon kind="md" fallback={FileCode2} />

@@ -102,19 +102,61 @@ type Cursor = {
   expandAfterPage?: number;
 };
 type FontStyle = "normal" | "bold" | "italic" | "bolditalic";
+type JsPdf = InstanceType<(typeof import("jspdf"))["jsPDF"]>;
 
-export async function exportCvToPdf(data: CVData) {
+export interface PdfOptions {
+  /**
+   * One-page résumé: drops the per-role activities, renders the professional
+   * focus as a single complete paragraph and shrinks typography until the whole
+   * document fits on a single A4 sheet.
+   */
+  compact?: boolean;
+}
+
+export async function exportCvToPdf(data: CVData, options: PdfOptions = {}) {
   const { jsPDF } = await import("jspdf");
-  const doc = new jsPDF({ unit: "mm", format: "a4", compress: true });
+  const compact = options.compact === true;
 
+  const make = (k: number) => {
+    const doc = new jsPDF({ unit: "mm", format: "a4", compress: true });
+    const result = renderPdf(doc, data, { compact, k });
+    return { doc, ...result };
+  };
+
+  let k = compact ? 0.92 : 1;
+  let out = make(k);
+  if (compact) {
+    // Shrink typography step by step until everything fits on one page.
+    while (out.doc.getNumberOfPages() > 1 && k > 0.6) {
+      k -= 0.03;
+      out = make(k);
+    }
+  } else {
+    // Avoid a last page holding only the focus panel: nudge the scale down a
+    // little (never below 88 %) so the panel joins the previous page.
+    while (out.orphanPanel && k > 0.88) {
+      k -= 0.02;
+      out = make(k);
+    }
+  }
+
+  out.doc.save(`${fileBase(data.name)}_CV${compact ? "_1pag" : ""}.pdf`);
+}
+
+function renderPdf(doc: JsPdf, data: CVData, { compact, k }: { compact: boolean; k: number }): { orphanPanel: boolean } {
   doc.setProperties({
-    title: `${data.name} — Hoja de Vida`,
+    title: `${data.name} — Hoja de Vida${compact ? " (resumen)" : ""}`,
     subject: data.title,
     author: data.name,
     keywords: "CV, hoja de vida, currículum",
     creator: "Hoja de Vida",
   });
   doc.setLanguage("es-ES");
+
+  /* ---- scale helpers: `k` shrinks fonts and vertical rhythm uniformly ---- */
+
+  const fs = (pt: number) => pt * k;
+  const sp = (mm: number) => mm * k;
 
   /* ---- low level writers ---- */
 
@@ -141,7 +183,8 @@ export async function exportCvToPdf(data: CVData) {
     text: string,
     opts: { size?: number; style?: FontStyle; color?: string; lh?: number; indent?: number } = {},
   ) => {
-    const { size = 9.5, style = "normal", color = C.body, lh = 1.45, indent = 0 } = opts;
+    const { size: rawSize = 9.5, style = "normal", color = C.body, lh = 1.45, indent = 0 } = opts;
+    const size = fs(rawSize);
     setFont(size, style, color);
     const lines = doc.splitTextToSize(text, c.w - indent) as string[];
     const h = lineH(size, lh);
@@ -153,22 +196,23 @@ export async function exportCvToPdf(data: CVData) {
     }
   };
 
-  const bullet = (c: Cursor, text: string, size = 9.5, color = C.body) => {
+  const bullet = (c: Cursor, text: string, rawSize = 9.5, color = C.body) => {
+    const size = fs(rawSize);
     const h = lineH(size, 1.45);
     ensure(c, h);
     setFont(size, "normal", C.primary);
     doc.text("•", c.x + 1, c.y, { baseline: "top" });
-    paragraph(c, text, { size, color, indent: 5 });
+    paragraph(c, text, { size: rawSize, color, indent: sp(5) });
   };
 
   const gap = (c: Cursor, mm: number) => {
-    c.y += mm;
+    c.y += sp(mm);
   };
 
   const sectionTitle = (c: Cursor, title: string) => {
-    const size = 9.5;
+    const size = fs(9.5);
     const h = lineH(size, 1.2);
-    ensure(c, h + 8);
+    ensure(c, h + sp(8));
     setFont(size, "bold", C.primary);
     doc.text(title, c.x, c.y, { baseline: "top", charSpace: 0.4 });
     const tw = doc.getTextWidth(title) + title.length * 0.4;
@@ -176,18 +220,20 @@ export async function exportCvToPdf(data: CVData) {
     doc.setDrawColor(C.rule);
     doc.setLineWidth(0.3);
     if (c.x + tw + 4 < c.x + c.w) doc.line(c.x + tw + 4, ruleY, c.x + c.w, ruleY);
-    c.y += h + 3.5;
+    c.y += h + sp(3.5);
   };
 
   const twoSided = (c: Cursor, left: string, right: string, opts: { leftStyle?: FontStyle; leftSize?: number; rightSize?: number; leftColor?: string; rightColor?: string; rightStyle?: FontStyle } = {}) => {
     const {
       leftStyle = "bold",
-      leftSize = 10.5,
-      rightSize = 8,
+      leftSize: rawLeft = 10.5,
+      rightSize: rawRight = 8,
       leftColor = C.text,
       rightColor = C.muted,
       rightStyle = "normal",
     } = opts;
+    const leftSize = fs(rawLeft);
+    const rightSize = fs(rawRight);
     setFont(rightSize, rightStyle, rightColor);
     const rw = doc.getTextWidth(right);
     const leftW = c.w - rw - 3;
@@ -206,7 +252,7 @@ export async function exportCvToPdf(data: CVData) {
   };
 
   const companyLine = (c: Cursor, company: string, location: string) => {
-    const size = 9;
+    const size = fs(9);
     const h = lineH(size, 1.4);
     ensure(c, h);
     setFont(size, "normal", C.link);
@@ -220,20 +266,22 @@ export async function exportCvToPdf(data: CVData) {
   /* ---- header (full width) ---- */
 
   let y = MARGIN;
-  setFont(24, "bold", C.primary);
+  const nameSize = fs(compact ? 21 : 24);
+  setFont(nameSize, "bold", C.primary);
   const nameLines = doc.splitTextToSize(data.name, CONTENT_W) as string[];
   for (const line of nameLines) {
     doc.text(line, MARGIN, y, { baseline: "top" });
-    y += lineH(24, 1.1);
+    y += lineH(nameSize, 1.1);
   }
-  y += 1.5;
-  setFont(10.5, "bold", C.link);
+  y += sp(1.5);
+  const titleSize = fs(10.5);
+  setFont(titleSize, "bold", C.link);
   doc.text(data.title.toUpperCase(), MARGIN, y, { baseline: "top", charSpace: 0.6 });
-  y += lineH(10.5, 1.3) + 2;
+  y += lineH(titleSize, 1.3) + sp(2);
   doc.setDrawColor(C.rule);
   doc.setLineWidth(0.3);
   doc.line(MARGIN, y, PAGE.w - MARGIN, y);
-  y += 4;
+  y += sp(4);
 
   // Contact row: flows onto several lines if needed, each item is a link
   const contacts: { label: string; url?: string }[] = [
@@ -244,10 +292,11 @@ export async function exportCvToPdf(data: CVData) {
     { label: data.contact.github, url: withProtocol(data.contact.github) },
   ].filter((i) => i.label);
 
-  setFont(8.5, "normal", C.muted);
+  const contactSize = fs(8.5);
+  setFont(contactSize, "normal", C.muted);
   const sep = "   ·   ";
   const sepW = doc.getTextWidth(sep);
-  const ch = lineH(8.5, 1.5);
+  const ch = lineH(contactSize, 1.5);
   let cx = MARGIN;
   contacts.forEach((item, idx) => {
     const w = doc.getTextWidth(item.label);
@@ -260,13 +309,13 @@ export async function exportCvToPdf(data: CVData) {
         cx += sepW;
       }
     }
-    setFont(8.5, "normal", C.body);
+    setFont(contactSize, "normal", C.body);
     if (item.url) doc.textWithLink(item.label, cx, y, { baseline: "top", url: item.url });
     else doc.text(item.label, cx, y, { baseline: "top" });
-    setFont(8.5, "normal", C.muted);
+    setFont(contactSize, "normal", C.muted);
     cx += w;
   });
-  y += ch + 7;
+  y += ch + sp(compact ? 5 : 7);
 
   /* ---- columns ---- */
 
@@ -286,12 +335,12 @@ export async function exportCvToPdf(data: CVData) {
 
   sectionTitle(side, "AÑOS DE EXPERIENCIA");
   data.yearsOfExperience.forEach((exp) => {
-    const size = 9;
+    const size = fs(9);
     const h = lineH(size, 1.6);
     ensure(side, h);
     doc.setFillColor(C.primary);
     doc.circle(side.x + 1, side.y + h / 2 - 0.6, 0.7, "F");
-    setFont(8, "bold", C.primary);
+    setFont(fs(8), "bold", C.primary);
     const years = `${exp.years} años`;
     const yw = doc.getTextWidth(years);
     doc.text(years, side.x + side.w, side.y + 0.5, { baseline: "top", align: "right" });
@@ -310,24 +359,31 @@ export async function exportCvToPdf(data: CVData) {
   main.expandAfterPage = side.page;
   sectionTitle(main, "RESUMEN PROFESIONAL");
   paragraph(main, data.summary, { size: 9.5 });
-  gap(main, 7);
+  gap(main, compact ? 5 : 7);
 
   sectionTitle(main, "EXPERIENCIA PROFESIONAL");
   data.experience.forEach((exp, i) => {
     if (i > 0) {
-      ensure(main, 6);
-      doc.setDrawColor(C.rule);
-      doc.setLineWidth(0.25);
-      doc.line(main.x, main.y + 1, main.x + main.w, main.y + 1);
-      gap(main, 5);
+      if (compact) {
+        gap(main, 3);
+      } else {
+        ensure(main, 6);
+        doc.setDrawColor(C.rule);
+        doc.setLineWidth(0.25);
+        doc.line(main.x, main.y + 1, main.x + main.w, main.y + 1);
+        gap(main, 5);
+      }
     }
     twoSided(main, exp.role, exp.period);
     gap(main, 0.8);
     companyLine(main, exp.company, exp.location);
-    gap(main, 1.5);
-    exp.bullets.forEach((b) => bullet(main, b));
+    // The one-page version lists only the roles, without their activities.
+    if (!compact) {
+      gap(main, 1.5);
+      exp.bullets.forEach((b) => bullet(main, b));
+    }
   });
-  gap(main, 7);
+  gap(main, compact ? 5 : 7);
 
   sectionTitle(main, "EDUCACIÓN");
   data.education.forEach((ed, i) => {
@@ -340,54 +396,86 @@ export async function exportCvToPdf(data: CVData) {
   /* ---- focus panel (full width, after the longer column) ---- */
 
   const lastPage = Math.max(main.page, side.page);
-  const startY = Math.max(main.page === lastPage ? main.y : 0, side.page === lastPage ? side.y : 0) + 8;
+  const startY = Math.max(main.page === lastPage ? main.y : 0, side.page === lastPage ? side.y : 0) + sp(8);
   const panel: Cursor = { x: MARGIN, w: CONTENT_W, y: startY, page: lastPage };
 
-  const PAD = 6;
-  const VALUES_W = 60;
-  const textX = panel.x + PAD + 14;
-  const valX = panel.x + panel.w - PAD - VALUES_W;
-  const descW = valX - textX - 8;
-  setFont(8.5, "normal", C.muted);
-  const descLines = doc.splitTextToSize(data.focus.description, descW) as string[];
-  const leftH = lineH(9.5, 1.3) + 1.5 + descLines.length * lineH(8.5, 1.45);
-  const rightH = data.focus.values.length * lineH(9, 1.7);
-  const panelH = Math.max(leftH, rightH) + PAD * 2;
+  const PAD = sp(6);
+  const focusTitleSize = fs(9.5);
+  const focusDescSize = fs(8.5);
+  const focusValSize = fs(9);
+  const textX = panel.x + PAD + sp(14);
 
-  ensure(panel, panelH);
-  doc.setFillColor(C.panel);
-  doc.roundedRect(panel.x, panel.y, panel.w, panelH, 3, 3, "F");
+  if (compact) {
+    // Full-width complete summary: title, the whole description, and the
+    // values inline on one line so the block stays as short as possible.
+    const descW = panel.x + panel.w - PAD - textX;
+    setFont(focusDescSize, "normal", C.muted);
+    const descLines = doc.splitTextToSize(data.focus.description, descW) as string[];
+    const valuesText = data.focus.values.join("   ·   ");
+    setFont(focusValSize, "normal", C.body);
+    const valueLines = doc.splitTextToSize(valuesText, descW) as string[];
+    const panelH =
+      PAD * 2 +
+      lineH(focusTitleSize, 1.3) +
+      sp(1.5) +
+      descLines.length * lineH(focusDescSize, 1.45) +
+      sp(2) +
+      valueLines.length * lineH(focusValSize, 1.5);
 
-  // Icon medallion
-  const iconCx = panel.x + PAD + 5;
-  const iconCy = panel.y + PAD + 5;
-  doc.setFillColor(C.primary);
-  doc.circle(iconCx, iconCy, 5, "F");
-  doc.setDrawColor("#ffffff");
-  doc.setLineWidth(0.5);
-  doc.circle(iconCx, iconCy, 3.2, "S");
-  doc.circle(iconCx, iconCy, 1.7, "S");
-  doc.setFillColor("#ffffff");
-  doc.circle(iconCx, iconCy, 0.6, "F");
+    ensure(panel, panelH);
+    doc.setFillColor(C.panel);
+    doc.roundedRect(panel.x, panel.y, panel.w, panelH, 3, 3, "F");
+    drawFocusIcon(doc, panel.x + PAD + sp(5), panel.y + PAD + sp(5), sp(5));
 
-  let ty = panel.y + PAD;
-  setFont(9.5, "bold", C.text);
-  doc.text(data.focus.title, textX, ty, { baseline: "top", charSpace: 0.3 });
-  ty += lineH(9.5, 1.3) + 1.5;
-  setFont(8.5, "normal", C.muted);
-  for (const line of descLines) {
-    doc.text(line, textX, ty, { baseline: "top" });
-    ty += lineH(8.5, 1.45);
+    let ty = panel.y + PAD;
+    setFont(focusTitleSize, "bold", C.text);
+    doc.text(data.focus.title, textX, ty, { baseline: "top", charSpace: 0.3 });
+    ty += lineH(focusTitleSize, 1.3) + sp(1.5);
+    setFont(focusDescSize, "normal", C.muted);
+    for (const line of descLines) {
+      doc.text(line, textX, ty, { baseline: "top" });
+      ty += lineH(focusDescSize, 1.45);
+    }
+    ty += sp(2);
+    setFont(focusValSize, "normal", C.primary);
+    for (const line of valueLines) {
+      doc.text(line, textX, ty, { baseline: "top" });
+      ty += lineH(focusValSize, 1.5);
+    }
+  } else {
+    const VALUES_W = 60;
+    const valX = panel.x + panel.w - PAD - VALUES_W;
+    const descW = valX - textX - 8;
+    setFont(focusDescSize, "normal", C.muted);
+    const descLines = doc.splitTextToSize(data.focus.description, descW) as string[];
+    const leftH = lineH(focusTitleSize, 1.3) + 1.5 + descLines.length * lineH(focusDescSize, 1.45);
+    const rightH = data.focus.values.length * lineH(focusValSize, 1.7);
+    const panelH = Math.max(leftH, rightH) + PAD * 2;
+
+    ensure(panel, panelH);
+    doc.setFillColor(C.panel);
+    doc.roundedRect(panel.x, panel.y, panel.w, panelH, 3, 3, "F");
+    drawFocusIcon(doc, panel.x + PAD + 5, panel.y + PAD + 5, 5);
+
+    let ty = panel.y + PAD;
+    setFont(focusTitleSize, "bold", C.text);
+    doc.text(data.focus.title, textX, ty, { baseline: "top", charSpace: 0.3 });
+    ty += lineH(focusTitleSize, 1.3) + 1.5;
+    setFont(focusDescSize, "normal", C.muted);
+    for (const line of descLines) {
+      doc.text(line, textX, ty, { baseline: "top" });
+      ty += lineH(focusDescSize, 1.45);
+    }
+
+    let vy = panel.y + PAD;
+    data.focus.values.forEach((v) => {
+      doc.setFillColor(C.link);
+      doc.circle(valX + 1, vy + lineH(focusValSize, 1.7) / 2 - 0.8, 0.8, "F");
+      setFont(focusValSize, "normal", C.body);
+      doc.text(v, valX + 4.5, vy, { baseline: "top" });
+      vy += lineH(focusValSize, 1.7);
+    });
   }
-
-  let vy = panel.y + PAD;
-  data.focus.values.forEach((v) => {
-    doc.setFillColor(C.link);
-    doc.circle(valX + 1, vy + lineH(9, 1.7) / 2 - 0.8, 0.8, "F");
-    setFont(9, "normal", C.body);
-    doc.text(v, valX + 4.5, vy, { baseline: "top" });
-    vy += lineH(9, 1.7);
-  });
 
   /* ---- page footer ---- */
 
@@ -396,10 +484,24 @@ export async function exportCvToPdf(data: CVData) {
     doc.setPage(p);
     setFont(7.5, "normal", C.muted);
     doc.text(data.name, MARGIN, PAGE.h - 8, { baseline: "top" });
-    doc.text(`${p} / ${total}`, PAGE.w - MARGIN, PAGE.h - 8, { baseline: "top", align: "right" });
+    if (total > 1) {
+      doc.text(`${p} / ${total}`, PAGE.w - MARGIN, PAGE.h - 8, { baseline: "top", align: "right" });
+    }
   }
 
-  doc.save(`${fileBase(data.name)}_CV.pdf`);
+  return { orphanPanel: panel.page > lastPage };
+}
+
+/** Small "target" medallion used as the icon of the professional-focus panel. */
+function drawFocusIcon(doc: JsPdf, cx: number, cy: number, r: number) {
+  doc.setFillColor(C.primary);
+  doc.circle(cx, cy, r, "F");
+  doc.setDrawColor("#ffffff");
+  doc.setLineWidth(0.5);
+  doc.circle(cx, cy, r * 0.64, "S");
+  doc.circle(cx, cy, r * 0.34, "S");
+  doc.setFillColor("#ffffff");
+  doc.circle(cx, cy, r * 0.12, "F");
 }
 
 /* -------------------------------------------------------------------------- */
