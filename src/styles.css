@@ -226,6 +226,14 @@
   }
 }
 
+/* Off-screen clone used for image export: freeze all motion so the capture is crisp */
+.cv-export-static,
+.cv-export-static * {
+  animation: none !important;
+  transition: none !important;
+  transform: none !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .icon-anim, .icon-pulse, .icon-wiggle, .icon-spin-hover, .dot-pulse {
     animation: none !important;
